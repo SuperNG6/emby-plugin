@@ -1,0 +1,38 @@
+name: Build and Package Emby Actor Headshot Plugin
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v3
+
+      - name: 设置 .NET 环境
+        uses: actions/setup-dotnet@v3
+        with:
+          dotnet-version: '6.0.x'
+
+      - name: 恢复依赖
+        run: dotnet restore EmbyActorHeadshotProvider.sln
+
+      - name: 编译解决方案
+        run: dotnet build EmbyActorHeadshotProvider.sln --configuration Release --no-restore
+
+      - name: 发布插件项目
+        run: dotnet publish EmbyActorHeadshotProvider/EmbyActorHeadshotProvider.csproj --configuration Release --no-build --output ./publish
+
+      - name: 打包插件为 ZIP 文件
+        run: zip -r emby-plugin.zip ./publish
+
+      - name: 上传插件构建产物
+        uses: actions/upload-artifact@v3
+        with:
+          name: emby-plugin
+          path: emby-plugin.zip

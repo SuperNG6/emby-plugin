@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net6.0</TargetFramework>
+    <OutputType>Library</OutputType>
+    <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+  </PropertyGroup>
+
+  <!-- 引用 Emby 插件相关程序集（请根据你的 Emby SDK 版本调整路径） -->
+  <ItemGroup>
+    <Reference Include="MediaBrowser.Common" />
+    <Reference Include="MediaBrowser.Controller" />
+    <Reference Include="MediaBrowser.Model" />
+  </ItemGroup>
+
+  <!-- 引用其他依赖包 -->
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Extensions.Caching.Memory" Version="6.0.0" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="6.0.0" />
+    <PackageReference Include="System.Text.Json" Version="6.0.0" />
+  </ItemGroup>
+</Project>
