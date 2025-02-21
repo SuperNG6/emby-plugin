@@ -1,194 +1,70 @@
-using MediaBrowser.Common.Configuration;
-using MediaBrowser.Common.Net;
-using MediaBrowser.Controller.Entities;
-using MediaBrowser.Controller.Providers;
-using MediaBrowser.Model.Providers;
-using MediaBrowser.Model.Serialization;
-using Microsoft.Extensions.Caching.Memory;
-using Microsoft.Extensions.Logging;
 using System;
-using System.Collections.Generic;
-using System.Linq;
 using System.Net.Http;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Caching.Memory;
+using Microsoft.Extensions.Logging;
+using MediaBrowser.Common.Plugins;
+using MediaBrowser.Controller.Providers;
+using MediaBrowser.Model.Logging;
+using MediaBrowser.Model.Providers;
 
-namespace EmbyActorHeadshotProvider
+public class EmbyActorHeadshotProvider : IRemoteMetadataProvider<Person, PersonLookupInfo>
 {
-    public class Plugin : BasePlugin
+    private readonly IHttpClientFactory _httpClientFactory;
+    private readonly IMemoryCache _memoryCache;
+    private readonly ILogger<EmbyActorHeadshotProvider> _logger;
+
+    public EmbyActorHeadshotProvider(IHttpClientFactory httpClientFactory, IMemoryCache memoryCache, ILogger<EmbyActorHeadshotProvider> logger)
     {
-        public override string Name => "Actor Headshot Provider";
-        public override Guid Id => new Guid("1a826edb-16c2-4978-a154-a87b8713f099");
-        public override string Description => "Provides actor headshots from local network source";
-        
-        public Plugin(IApplicationPaths applicationPaths) : base(applicationPaths)
-        {
-            Instance = this;
-        }
-        
-        public static Plugin Instance { get; private set; }
+        _httpClientFactory = httpClientFactory ?? throw new ArgumentNullException(nameof(httpClientFactory));
+        _memoryCache = memoryCache ?? throw new ArgumentNullException(nameof(memoryCache));
+        _logger = logger ?? throw new ArgumentNullException(nameof(logger));
     }
 
-    public class ActorImageProvider : IRemoteImageProvider, IHasOrder
+    public string Name => "Emby Actor Headshot Provider";
+
+    public async Task<MetadataResult<Person>> GetMetadata(PersonLookupInfo info, CancellationToken cancellationToken)
     {
-        private readonly IHttpClientFactory _httpClientFactory;
-        private readonly ILogger<ActorImageProvider> _logger;
-        private readonly IMemoryCache _cache;
-        private const string BASE_URL = "http://127.0.0.1";
-        private const string FILETREE_URL = "/Filetree.json";
-        private const string CONTENT_PATH = "/Content/";
-        private const string CACHE_KEY = "ActorMappingCache";
-        private static readonly TimeSpan CACHE_DURATION = TimeSpan.FromMinutes(30);
-
-        public string Name => "Local Actor Headshot Provider";
-        public int Order => 1;  // 优先级较高
-        
-        public ActorImageProvider(
-            IHttpClientFactory httpClientFactory,
-            ILogger<ActorImageProvider> logger,
-            IMemoryCache cache)
+        if (info == null || string.IsNullOrEmpty(info.Name))
         {
-            _httpClientFactory = httpClientFactory;
-            _logger = logger;
-            _cache = cache;
+            return new MetadataResult<Person> { HasMetadata = false };
         }
 
-        public bool Supports(BaseItem item) => item is Person;
-
-        public IEnumerable<ImageType> GetSupportedImages(BaseItem item)
+        var cacheKey = $"actor-headshot-{info.Name}";
+        if (_memoryCache.TryGetValue(cacheKey, out MetadataResult<Person> cachedResult))
         {
-            return new[] { ImageType.Primary };
+            return cachedResult;
         }
 
-        private class ActorMapping
-        {
-            public Dictionary<string, Dictionary<string, string>> Content { get; set; }
-        }
+        var httpClient = _httpClientFactory.CreateClient();
+        var url = $"https://api.example.com/actor/{Uri.EscapeDataString(info.Name)}/image";
+        _logger.LogInformation("Fetching headshot for {ActorName} from {Url}", info.Name, url);
 
-        private async Task<ActorMapping> GetActorMappingAsync(CancellationToken cancellationToken)
+        try
         {
-            if (_cache.TryGetValue(CACHE_KEY, out ActorMapping mapping))
+            var response = await httpClient.GetAsync(url, cancellationToken);
+            if (response.IsSuccessStatusCode)
             {
-                return mapping;
-            }
-
-            try
-            {
-                using var client = _httpClientFactory.CreateClient();
-                var response = await client.GetStringAsync($"{BASE_URL}{FILETREE_URL}", cancellationToken);
-                
-                var options = new JsonSerializerOptions
+                var imageUrl = await response.Content.ReadAsStringAsync(cancellationToken);
+                var result = new MetadataResult<Person>
                 {
-                    PropertyNameCaseInsensitive = true
+                    Item = new Person { Name = info.Name, PrimaryImagePath = imageUrl },
+                    HasMetadata = true
                 };
-                
-                mapping = JsonSerializer.Deserialize<ActorMapping>(response, options);
-                
-                _cache.Set(CACHE_KEY, mapping, CACHE_DURATION);
-                return mapping;
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Error fetching actor mapping from {Url}", $"{BASE_URL}{FILETREE_URL}");
-                return new ActorMapping { Content = new Dictionary<string, Dictionary<string, string>>() };
+                _memoryCache.Set(cacheKey, result, TimeSpan.FromHours(1));
+                return result;
             }
         }
-
-        private string NormalizeActorName(string name)
+        catch (Exception ex)
         {
-            return name.Replace(" ", "").ToLowerInvariant();
+            _logger.LogError(ex, "Error fetching actor headshot for {ActorName}", info.Name);
         }
 
-        private (string category, string mappedImage)? FindActorImage(
-            ActorMapping mapping, 
-            string actorName)
-        {
-            var normalizedName = NormalizeActorName(actorName);
-            
-            foreach (var category in mapping.Content)
-            {
-                foreach (var actor in category.Value)
-                {
-                    var possibleNames = new[]
-                    {
-                        NormalizeActorName(actor.Key),
-                        NormalizeActorName(System.IO.Path.GetFileNameWithoutExtension(actor.Key))
-                    };
-
-                    if (possibleNames.Any(n => n == normalizedName))
-                    {
-                        // 移除时间戳参数
-                        var mappedImage = actor.Value;
-                        var queryIndex = mappedImage.IndexOf('?');
-                        if (queryIndex > 0)
-                        {
-                            mappedImage = mappedImage.Substring(0, queryIndex);
-                        }
-                        
-                        return (category.Key, mappedImage);
-                    }
-                }
-            }
-
-            return null;
-        }
-
-        public async Task<IEnumerable<RemoteImageInfo>> GetImages(BaseItem item, CancellationToken cancellationToken)
-        {
-            var person = item as Person;
-            if (person == null) return Array.Empty<RemoteImageInfo>();
-
-            try
-            {
-                var mapping = await GetActorMappingAsync(cancellationToken);
-                var result = FindActorImage(mapping, person.Name);
-                
-                if (result.HasValue)
-                {
-                    var (category, mappedImage) = result.Value;
-                    var imageUrl = $"{BASE_URL}{CONTENT_PATH}{category}/{mappedImage}";
-                    
-                    _logger.LogInformation(
-                        "Found image for actor {ActorName}: {ImageUrl}", 
-                        person.Name, 
-                        imageUrl);
-
-                    return new[]
-                    {
-                        new RemoteImageInfo
-                        {
-                            ProviderName = Name,
-                            Url = imageUrl,
-                            Type = ImageType.Primary,
-                            DateModified = DateTime.UtcNow
-                        }
-                    };
-                }
-                
-                _logger.LogWarning(
-                    "No image found for actor {ActorName}", 
-                    person.Name);
-                    
-                return Array.Empty<RemoteImageInfo>();
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(
-                    ex,
-                    "Error getting image for actor {ActorName}",
-                    person.Name);
-                    
-                return Array.Empty<RemoteImageInfo>();
-            }
-        }
+        return new MetadataResult<Person> { HasMetadata = false };
     }
 
-    // 插件配置
-    public class PluginConfiguration
-    {
-        public string BaseUrl { get; set; } = "http://127.0.0.1";
-        public int CacheDurationMinutes { get; set; } = 30;
-        public bool EnableLogging { get; set; } = true;
-    }
+    public Task<HttpResponseMessage> GetImageResponse(string url, CancellationToken cancellationToken) =>
+        _httpClientFactory.CreateClient().GetAsync(url, cancellationToken);
 }
